@@ -1,189 +1,108 @@
 import os
-import base64
 import io
-import re
-from PIL import Image, ImageDraw, ImageFont
+import base64
 from google import genai
 from google.genai import types
 
 # Region from user hint
 REGION = "us-central1"
 
-class BrandConfig:
-    DARK_BLUE = "#070E30"
-    SUMMER_YELLOW = "#FFD600"
-    WINTER_CYAN = "#00C8DC"
-    WHITE = "#FFFFFF"
-    
-    FONT_BOLD = "fonts/atyp-font/AtypDisplay-Bold.ttf"
-    FONT_REGULAR = "fonts/atyp-font/AtypText-Regular.ttf"
-    FONT_EXTRABOLD = "fonts/atyp-font/AtypDisplay-Bold.ttf" # Using Bold as fallback since ExtraBold is not available
-    
-    ASSETS_DIR = "assets"
-    
-    @classmethod
-    def load_from_design_md(cls, design_guidelines):
-        # Extract colors if present
-        db_match = re.search(r"Sportega Dark Blue:.*?`(#([0-9A-Fa-f]{6}))`", design_guidelines)
-        if db_match: cls.DARK_BLUE = db_match.group(1)
-        
-        sy_match = re.search(r"Sportega Summer Yellow:.*?`(#([0-9A-Fa-f]{6}))`", design_guidelines)
-        if sy_match: cls.SUMMER_YELLOW = sy_match.group(1)
-        
-        wc_match = re.search(r"Sportega Winter Cyan:.*?`(#([0-9A-Fa-f]{6}))`", design_guidelines)
-        if wc_match: cls.WINTER_CYAN = wc_match.group(1)
-
 def get_client():
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+    # Using vertexai=True to access Gemini 2.0 Flash with Image generation capabilities
     return genai.Client(vertexai=True, project=project_id, location=REGION)
 
-def get_smart_crop_coords(image_bytes):
-    """Uses Gemini to find the best 600x400 crop coordinates."""
-    try:
-        client = get_client()
-        mime_type = "image/jpeg" 
-            
-        prompt = """
-        Analyze this image and identify the main subject (product or person).
-        I need to crop this image to a 3:2 aspect ratio (specifically for a 600x400 banner).
-        Suggest the best cropping box as [ymin, xmin, ymax, xmax] in normalized coordinates (0-1000).
-        The crop MUST be 3:2. 
-        Return ONLY the coordinates in this format: [ymin, xmin, ymax, xmax].
-        """
-        
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                prompt
-            ]
-        )
-        text = response.text.strip()
-        match = re.search(r"\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]", text)
-        if match:
-            return [int(x) for x in match.groups()]
-    except Exception as e:
-        print(f"Warning: Gemini smart crop failed ({e}). Falling back to center crop.")
-    
-    return [166, 0, 833, 1000]
-
-def get_font(font_name, size):
-    """Loads a font from assets or falls back to system fonts."""
-    font_path = os.path.join(BrandConfig.ASSETS_DIR, font_name)
-    if os.path.exists(font_path):
-        try:
-            return ImageFont.truetype(font_path, size)
-        except:
-            pass
-    
-    # Fallback paths
-    fallbacks = [
-        "/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Bold.ttf" if "Bold" in font_name else "/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if "Bold" in font_name else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]
-    for path in fallbacks:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except:
-                continue
-    return ImageFont.load_default()
-
 def create_banner_image(image_bytes, heading, perex, design_guidelines, vendor_name=None):
-    """Processes the image and overlays text according to Sportega mailing guidelines."""
-    BrandConfig.load_from_design_md(design_guidelines)
+    """Creates a banner using pure Multimodal LLM generation (Gemini 2.0)."""
+    client = get_client()
     
-    coords = get_smart_crop_coords(image_bytes)
+    # Construct the multimodal request for Gemini 2.0 Flash
+    # This model can take images as input and produce an image as output (responseModalities=["IMAGE"])
     
-    img_io = io.BytesIO(image_bytes)
-    with Image.open(img_io) as img:
-        width, height = img.size
-        
-        # Crop & Resize
-        ymin, xmin, ymax, xmax = coords
-        left, top, right, bottom = xmin * width / 1000, ymin * height / 1000, xmax * width / 1000, ymax * height / 1000
-        
-        target_ratio = 1.5
-        current_ratio = (right - left) / (bottom - top) if (bottom - top) > 0 else 1
-        
-        if current_ratio > target_ratio:
-            new_w = (bottom - top) * target_ratio
-            cx = (left + right) / 2
-            left, right = cx - new_w / 2, cx + new_w / 2
-        else:
-            new_h = (right - left) / target_ratio
-            cy = (top + bottom) / 2
-            top, bottom = cy - new_h / 2, cy + new_h / 2
-            
-        img_cropped = img.crop((left, top, right, bottom))
-        img_resized = img_cropped.resize((600, 400), Image.Resampling.LANCZOS).convert("RGBA")
-        
-        # 1. Draw Dark Overlay (Left side, 60-75% opacity)
-        overlay = Image.new("RGBA", (600, 400), (0, 0, 0, 0))
-        draw_overlay = ImageDraw.Draw(overlay)
-        # Gradient or solid? Guidelines say "Tmavý overlay levo"
-        # We'll do a solid block on the left with a slight fade
-        overlay_width = 300
-        for x in range(overlay_width):
-            alpha = int(255 * 0.75 * (1 - (x / overlay_width) ** 2)) # Quadratic fade
-            draw_overlay.line([(x, 0), (x, 400)], fill=(0, 0, 0, alpha))
-        
-        img_final = Image.alpha_composite(img_resized, overlay)
-        draw = ImageDraw.Draw(img_final)
-        
-        # 2. Heading: Atyp Bold/ExtraBold, white, max 3-4 words
-        h_font = get_font(BrandConfig.FONT_EXTRABOLD, 40)
-        draw.text((30, 40), heading, font=h_font, fill=BrandConfig.WHITE)
-        
-        # 3. Perex: Atyp Regular, white, max 2 sentences
-        p_font = get_font(BrandConfig.FONT_REGULAR, 18)
-        # Word wrap for perex
-        perex_lines = []
-        words = perex.split()
-        line = ""
-        for word in words:
-            test_line = line + word + " "
-            if draw.textlength(test_line, font=p_font) < 240:
-                line = test_line
-            else:
-                perex_lines.append(line)
-                line = word + " "
-        perex_lines.append(line)
-        
-        y_offset = 120
-        for line in perex_lines[:3]: # Limit to 3 lines
-            draw.text((30, y_offset), line.strip(), font=p_font, fill=BrandConfig.WHITE)
-            y_offset += 25
+    contents = [
+        types.Part.from_text(text=f"""You are an expert graphic designer and brand guardian for Sportega.
+Your task is to CREATE a 600x400 px banner for a mailing campaign.
 
-        # 4. CTA Button: Summer Yellow, Atyp Bold, vlevo dole
-        btn_font = get_font(BrandConfig.FONT_BOLD, 18)
-        btn_text = "To chci"
-        btn_w = draw.textlength(btn_text, font=btn_font) + 40
-        btn_h = 45
-        btn_x, btn_y = 30, 320
+DESIGN GUIDELINES:
+{design_guidelines}
+
+BANNER CONTENT:
+- HEADING: {heading}
+- PEREX: {perex}
+- VENDOR: {vendor_name if vendor_name else 'None'}
+
+INSTRUCTIONS:
+1. OUTPUT: You must respond with a single 600x400 px image.
+2. COMPOSITION: Use the provided base image. Regardless of its original aspect ratio, crop or recompose it into a 3:2 frame so the main subject (athlete or product) is prominent.
+3. OVERLAY: Apply a dark overlay on the left side (60-75% opacity) to provide a clean area for text, exactly as shown in the example banners.
+4. TEXT: 
+   - Render the HEADING in a bold, clean, white font on the overlay.
+   - Render the PEREX in a regular, clean, white font below the heading.
+5. CTA: Include a 'To chci' call-to-action button in Summer Yellow (#FFD600) with Dark Blue (#070E30) text at the bottom left.
+6. VENDOR BRANDING: If a vendor is specified, place their logo in the bottom right. 
+
+CONSTRAINTS:
+- Make sure that you don't leak font names into the final image
+- Make sure that you follow provided design guides
+
+EXAMPLES:
+- I am providing example banners for style reference, and the base image to be used for this specific banner.""")
+    ]
+    
+    # 1. Add example images for few-shot visual context
+    example_dir = os.path.join(os.path.dirname(__file__), "example-banners")
+    print(f"Example directory: {example_dir}")
+    if os.path.exists(example_dir):
+        # We limit examples to avoid context bloat while providing enough visual grounding
+        for filename in sorted(os.listdir(example_dir))[:2]:
+            if filename.lower().endswith((".jpg", ".jpeg", ".png")):
+                path = os.path.join(example_dir, filename)
+                with open(path, "rb") as f:
+                    print("attaching image")
+                    contents.append(types.Part.from_bytes(data=f.read(), mime_type="image/jpeg"))
+    
+    # 2. Add the base image (the core subject)
+    contents.append(types.Part.from_text(text="BASE IMAGE (Use this as the source for the banner):"))
+    contents.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
+    
+    # 3. Add the vendor logo if applicable
+    if vendor_name:
+        assets_dir = os.path.join(os.path.dirname(__file__), "assets")
+        # Check subdirectories as well based on previous user info
+        vendor_logo_path = os.path.join(assets_dir, f"{vendor_name.lower()}_logo.png")
+        if not os.path.exists(vendor_logo_path):
+             vendor_logo_path = os.path.join(assets_dir, "logos", f"{vendor_name.lower()}_logo.png")
+             
+        if os.path.exists(vendor_logo_path):
+            with open(vendor_logo_path, "rb") as f:
+                contents.append(types.Part.from_text(text=f"VENDOR LOGO for {vendor_name}:"))
+                contents.append(types.Part.from_bytes(data=f.read(), mime_type="image/png"))
+
+    # 4. Execute the Multimodal Generation
+    # We use gemini-2.5-flash-image which supports multimodal image output
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-image",
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+            )
+        )
         
-        # Rounded rectangle
-        draw.rounded_rectangle([btn_x, btn_y, btn_x + btn_w, btn_y + btn_h], radius=15, fill=BrandConfig.SUMMER_YELLOW)
-        draw.text((btn_x + 20, btn_y + 10), btn_text, font=btn_font, fill=BrandConfig.DARK_BLUE)
+        # Extract the image from the response parts
+        if response.candidates and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                # The GenAI SDK returns images in the 'inline_data' or a specific 'image' field depending on version
+                if part.inline_data:
+                    return part.inline_data.data
+                elif hasattr(part, 'image') and part.image:
+                    return part.image.image_bytes
+                    
+        raise Exception("Gemini returned a success response but no image data was found in the parts.")
         
-        # 5. Logo Partnera: Vpravo nahore
-        if vendor_name:
-            vendor_logo_path = os.path.join(BrandConfig.ASSETS_DIR, f"{vendor_name.lower()}_logo.png")
-            if not os.path.exists(vendor_logo_path):
-                # Try generic logo
-                vendor_logo_path = os.path.join(BrandConfig.ASSETS_DIR, "vendor_logo.png")
-                
-            if os.path.exists(vendor_logo_path):
-                with Image.open(vendor_logo_path) as logo:
-                    logo = logo.convert("RGBA")
-                    # Resize logo to fit
-                    logo_w, logo_h = logo.size
-                    max_logo_w = 120
-                    scale = max_logo_w / logo_w
-                    logo = logo.resize((int(logo_w * scale), int(logo_h * scale)), Image.Resampling.LANCZOS)
-                    img_final.paste(logo, (600 - logo.size[0] - 20, 20), logo)
-        
-        # Convert back to RGB for PNG save if needed, or keep RGBA
-        buf = io.BytesIO()
-        img_final.convert("RGB").save(buf, format="PNG")
-        return buf.getvalue()
+    except Exception as e:
+        # Provide a descriptive error for the agent to report
+        raise Exception(f"Multimodal generation failed: {str(e)}. Ensure the model 'gemini-2.0-flash-001' is available and 'IMAGE' modality is supported in your project/region.")
+
+def get_base64_image(image_bytes):
+    return base64.b64encode(image_bytes).decode("utf-8")
