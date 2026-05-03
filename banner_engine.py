@@ -1,108 +1,164 @@
 import os
-import io
 import base64
 from google import genai
 from google.genai import types
 
+SYSTEM_PROMPT = """
+## Design Guidelines
+
+### Brand Identity
+
+Sportega is a Czech sports e-commerce brand (est. 2002).
+
+- **Mission:** Helping every athlete find gear that truly fits them. Speaking athlete to athlete.
+- **Core Values:**
+  - **Energy:** Lively, dynamic, full of movement.
+  - **Authenticity:** No marketing jargon; human and experience-based.
+  - **Relevance:** Useful content for athletes.
+  - **Playfulness:** Sport should be fun; humor and wordplay are encouraged.
+
+### Brand Colors
+
+- **Sportega Dark Blue:** `#070E30` 
+- **Sportega Summer Yellow:** `#FFD600` - Used for warm sports (outdoor, cycling, tennis, football).
+- **Sportega Winter Cyan:** `#00C8DC` - Used for winter sports (hockey, skiing, winter running).
+
+### Logo Usage
+
+- **Primary Colors:** Dark Blue or Summer Yellow.
+- **Clear Space:** Minimum clear space equal to the height of the letter 'S' in the logotype.
+- **Primary Combination:** Dark Blue + Summer Yellow.
+- **Winter Variant:** Dark Blue + Winter Cyan.
+- **White:** Neutral background or text on dark surfaces.
+- **Never Combine:** Do not mix Summer Yellow and Winter Cyan as equal primary colors on the same surface.
+- **Don'ts:** Do not rotate, distort, recolor (outside approved variants), add effects, or use on busy/low-contrast backgrounds.
+
+### Typography
+
+Sportega uses two typefaces to balance professionalism and personality.
+
+#### Primary font: ATYP
+
+- **Usage:** Headlines, body text, UI, emails, banners.
+- **Weights:** Regular, Medium, Bold, ExtraBold.
+
+#### Complementary font: NARRABEEN
+
+- **Usage:** Taglines, accents, display headlines, campaign headings. Use sparingly for maximum impact.
+
+#### Hierarchy
+
+- **H1 (Main Headline):** Atyp Bold/ExtraBold, 32–48 pt (Campaigns, hero sections).
+- **H2 (Section Heading):** Atyp Bold, 22–28 pt (Pages, chapters).
+- **H3 (Subheading):** Atyp Medium/Bold, 16–18 pt (Sub-chapters, categories).
+- **Body Text:** Atyp Regular, 10–12 pt.
+- **Caption:** Atyp Regular Italic, 8–9 pt.
+- **Label:** Atyp Bold, 8–10 pt (UI elements, tags, buttons).
+
+### Visual Elements
+
+- **Doodles:** Hand-drawn, monochromatic (White, Summer Yellow, or Dark Blue). Used as accents, never dominant.
+- **Icons:** Clean, functional, aligned with brand colors.
+- **Patterns:** Used as background fills or decorative elements (never as primary information).
+
+### Tone of Voice
+
+- **Pillars:**
+  - **Friendly & Informal:** Use "tykání" (first-name basis), no anonymous texts.
+  - **Clear & Energetic:** Short sentences, rhythm, wordplay, light slang.
+  - **Factual but Emotional:** Real benefits, own language, metaphors.
+- **Check:** "Would I write about this experience to a friend after training?"
+
+### Do's & Don'ts
+- **DO:** Use high-quality images, keep focal points (faces/products) looking into the banner, use dark overlays for readability, follow typographic hierarchy.
+- **DON'T:** Use blurry/stock photos, distort logos, use more than 3 typographic layers, mix brand colors inappropriately, or use corporate jargon.
+"""
+
+
 # Region from user hint
-REGION = "us-central1"
+REGION = "global"
 
 def get_client():
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    # Using vertexai=True to access Gemini 2.0 Flash with Image generation capabilities
     return genai.Client(vertexai=True, project=project_id, location=REGION)
 
-def create_banner_image(image_bytes, heading, perex, design_guidelines, vendor_name=None):
-    """Creates a banner using pure Multimodal LLM generation (Gemini 2.0)."""
+
+def create_banner_image(image_bytes, heading, perex, cta_text, aspect_ratio):
+    """Creates a banner using multimodal LLM generation with strict dimension enforcement."""
     client = get_client()
     
-    # Construct the multimodal request for Gemini 2.0 Flash
-    # This model can take images as input and produce an image as output (responseModalities=["IMAGE"])
-    
     contents = [
-        types.Part.from_text(text=f"""You are an expert graphic designer and brand guardian for Sportega.
-Your task is to CREATE a 600x400 px banner for a mailing campaign.
+        types.Part.from_text(text=f"""
+Create a mailing banner with following features:
 
-DESIGN GUIDELINES:
-{design_guidelines}
-
-BANNER CONTENT:
-- HEADING: {heading}
-- PEREX: {perex}
-- VENDOR: {vendor_name if vendor_name else 'None'}
-
-INSTRUCTIONS:
-1. OUTPUT: You must respond with a single 600x400 px image.
-2. COMPOSITION: Use the provided base image. Regardless of its original aspect ratio, crop or recompose it into a 3:2 frame so the main subject (athlete or product) is prominent.
-3. OVERLAY: Apply a dark overlay on the left side (60-75% opacity) to provide a clean area for text, exactly as shown in the example banners.
-4. TEXT: 
-   - Render the HEADING in a bold, clean, white font on the overlay.
-   - Render the PEREX in a regular, clean, white font below the heading.
-5. CTA: Include a 'To chci' call-to-action button in Summer Yellow (#FFD600) with Dark Blue (#070E30) text at the bottom left.
-6. VENDOR BRANDING: If a vendor is specified, place their logo in the bottom right. 
-
-CONSTRAINTS:
-- Make sure that you don't leak font names into the final image
-- Make sure that you follow provided design guides
-
-EXAMPLES:
-- I am providing example banners for style reference, and the base image to be used for this specific banner.""")
+- Overlay: Add color gradient overlay coming from left. Use the dark blue brand color.
+- Font: Make sure you use the correct font from the brand guidelines.
+- Headline: Bold font weight. White text color. Put there this exact text {heading}.
+- Perex: Regular font weight. White or grey color. Put there this exact text {perex}.
+- Vertical Alignment: The Heading and Perex text block must be vertically centered within the dark overlay or positioned in the upper half. Never place the main text at the very bottom.
+- CTA Button: Summer Yellow (#FFD600), Bold font weight, bottom left with generous margins. Button should have rounded corners (be pill shaped). Put there this exact text {cta_text}
+- Image: High-quality product or athlete.
+- Do NOT put a Sportega logo to the image.
+""")
     ]
     
-    # 1. Add example images for few-shot visual context
+    # Attach base image
+    contents.append(types.Part.from_text(text="Base image is:"))
+    contents.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
+
+    # Attach samples
     example_dir = os.path.join(os.path.dirname(__file__), "example-banners")
-    print(f"Example directory: {example_dir}")
     if os.path.exists(example_dir):
-        # We limit examples to avoid context bloat while providing enough visual grounding
+        contents.append(types.Part.from_text(text="Example of previous banners are:"))
         for filename in sorted(os.listdir(example_dir))[:2]:
             if filename.lower().endswith((".jpg", ".jpeg", ".png")):
                 path = os.path.join(example_dir, filename)
                 with open(path, "rb") as f:
-                    print("attaching image")
                     contents.append(types.Part.from_bytes(data=f.read(), mime_type="image/jpeg"))
     
-    # 2. Add the base image (the core subject)
-    contents.append(types.Part.from_text(text="BASE IMAGE (Use this as the source for the banner):"))
-    contents.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
-    
-    # 3. Add the vendor logo if applicable
-    if vendor_name:
-        assets_dir = os.path.join(os.path.dirname(__file__), "assets")
-        # Check subdirectories as well based on previous user info
-        vendor_logo_path = os.path.join(assets_dir, f"{vendor_name.lower()}_logo.png")
-        if not os.path.exists(vendor_logo_path):
-             vendor_logo_path = os.path.join(assets_dir, "logos", f"{vendor_name.lower()}_logo.png")
-             
-        if os.path.exists(vendor_logo_path):
-            with open(vendor_logo_path, "rb") as f:
-                contents.append(types.Part.from_text(text=f"VENDOR LOGO for {vendor_name}:"))
-                contents.append(types.Part.from_bytes(data=f.read(), mime_type="image/png"))
+    # Attach brand assets 
+    assets_dir = os.path.join(os.path.dirname(__file__), "assets", "brand_assets.png")
+    contents.append(types.Part.from_text(text="Brand assets (like fonts, doodles and icons) are:"))
+    with open(path, "rb") as f:
+        print("reading assets")
+        contents.append(types.Part.from_bytes(data=f.read(), mime_type="image/png"))
 
-    # 4. Execute the Multimodal Generation
-    # We use gemini-2.5-flash-image which supports multimodal image output
+    # Execute image generation
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash-image",
+            model="gemini-3.1-flash-image-preview",
             contents=contents,
             config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"],
+                response_modalities=["TEXT", "IMAGE"],
+                image_config=types.ImageConfig(
+                    aspect_ratio=aspect_ratio,
+                    image_size="1K",
+                    output_mime_type="image/png",
+                ),
+                thinking_config=types.ThinkingConfig(
+                    thinking_level="HIGH",
+                ) 
             )
         )
         
-        # Extract the image from the response parts
+        image_data = None
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
-                # The GenAI SDK returns images in the 'inline_data' or a specific 'image' field depending on version
                 if part.inline_data:
-                    return part.inline_data.data
+                    image_data = part.inline_data.data
+                    break
                 elif hasattr(part, 'image') and part.image:
-                    return part.image.image_bytes
+                    image_data = part.image.image_bytes
+                    break
                     
-        raise Exception("Gemini returned a success response but no image data was found in the parts.")
+        if not image_data:
+            raise Exception("Gemini returned no image data.")
+
+        return image_data
+            
         
     except Exception as e:
-        # Provide a descriptive error for the agent to report
-        raise Exception(f"Multimodal generation failed: {str(e)}. Ensure the model 'gemini-2.0-flash-001' is available and 'IMAGE' modality is supported in your project/region.")
+        raise Exception(f"Multimodal generation failed: {str(e)}")
 
 def get_base64_image(image_bytes):
     return base64.b64encode(image_bytes).decode("utf-8")
